@@ -29,7 +29,7 @@ from ApplicationServices import (
 )
 
 from config import CONFIG
-from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_text_urls
+from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_url, scrub_text_urls
 
 _SCREEN_CFG = CONFIG["screen_reader"]
 
@@ -169,6 +169,7 @@ def capture_active_window():
             "app": app_name,
             "title": "[blocked]",
             "text": "",
+            "url": None,
             "pid": pid,
             "filtered": "app_blocked",
         }
@@ -184,6 +185,7 @@ def capture_active_window():
     focused_window = _ax_attr(ax_app, "AXFocusedWindow")
     window_title = ""
     visible_text = ""
+    url = None
 
     if focused_window is not None:
         title_val = _ax_attr(focused_window, "AXTitle")
@@ -197,6 +199,7 @@ def capture_active_window():
                 "app": app_name,
                 "title": "[private window]",
                 "text": "",
+                "url": None,
                 "pid": pid,
                 "filtered": "private_window",
             }
@@ -207,6 +210,11 @@ def capture_active_window():
         # Layer 3 (secure field skipping) is applied inside _extract_text_from_element.
         web_area = _find_web_area(focused_window, max_depth=_SCREEN_CFG.get("ax_web_area_search_depth", 10))
         if web_area is not None:
+            # Extract URL from AXWebArea (works on Chromium, Safari, Electron)
+            url_val = _ax_attr(web_area, "AXURL")
+            if url_val is not None:
+                url = str(url_val)
+
             raw_texts = _extract_text_from_element(web_area, max_depth=_SCREEN_CFG.get("ax_web_content_depth", 15))
         else:
             # Native apps: shallower traversal is sufficient
@@ -223,8 +231,10 @@ def capture_active_window():
         max_text = _SCREEN_CFG.get("max_text_length", 20000)
         visible_text = " | ".join(unique_texts)[:max_text]
 
-        # Layer 4: Scrub sensitive URL parameters from captured text
+        # Layer 4: Scrub sensitive URL parameters
         visible_text = scrub_text_urls(visible_text)
+        if url is not None:
+            url = scrub_url(url)
 
         # Layer 5: Detect sensitive pages (password managers, banking, etc.)
         # This runs AFTER text extraction so it can inspect the content,
@@ -235,6 +245,7 @@ def capture_active_window():
                 "app": app_name,
                 "title": "[sensitive page]",
                 "text": "",
+                "url": None,
                 "pid": pid,
                 "filtered": "sensitive_page",
             }
@@ -244,6 +255,7 @@ def capture_active_window():
         "app": app_name or "Unknown",
         "title": window_title,
         "text": visible_text,
+        "url": url,
         "pid": pid,
     }
 
