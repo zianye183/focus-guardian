@@ -27,11 +27,28 @@ from ApplicationServices import (
     AXUIElementCreateApplication,
     AXUIElementCopyAttributeValue,
 )
+from Quartz.CoreGraphics import (
+    CGEventSourceSecondsSinceLastEventType,
+    kCGEventSourceStateHIDSystemState,
+    kCGAnyInputEventType,
+)
 
 from config import CONFIG
 from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_url, scrub_text_urls
 
 _SCREEN_CFG = CONFIG["screen_reader"]
+_IDLE_TIMEOUT = _SCREEN_CFG.get("idle_timeout_seconds", 180)
+
+
+# ---------------------------------------------------------------------------
+# Idle detection
+# ---------------------------------------------------------------------------
+
+def seconds_since_last_input():
+    """Seconds since last keyboard/mouse/trackpad event (macOS HID layer)."""
+    return CGEventSourceSecondsSinceLastEventType(
+        kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -161,6 +178,7 @@ def capture_active_window():
     app_name = frontmost["name"]
     pid = frontmost["pid"]
     ts = datetime.now(timezone.utc).isoformat()
+    idle_s = round(seconds_since_last_input(), 1)
 
     # Layer 1: App blocklist — record that the app was used, but read nothing
     if is_app_blocked(app_name):
@@ -171,6 +189,7 @@ def capture_active_window():
             "text": "",
             "url": None,
             "pid": pid,
+            "idle_s": idle_s,
             "filtered": "app_blocked",
         }
 
@@ -201,6 +220,7 @@ def capture_active_window():
                 "text": "",
                 "url": None,
                 "pid": pid,
+                "idle_s": idle_s,
                 "filtered": "private_window",
             }
 
@@ -247,6 +267,7 @@ def capture_active_window():
                 "text": "",
                 "url": None,
                 "pid": pid,
+                "idle_s": idle_s,
                 "filtered": "sensitive_page",
             }
 
@@ -257,6 +278,7 @@ def capture_active_window():
         "text": visible_text,
         "url": url,
         "pid": pid,
+        "idle_s": idle_s,
     }
 
 
@@ -316,25 +338,78 @@ def append_to_buffer(record, buffer_dir="data/buffer"):
 # Main: continuous capture loop
 # ---------------------------------------------------------------------------
 
+def _emit(record, buffer_dir, verbose):
+    """Write a record to buffer and/or stdout."""
+    if buffer_dir:
+        append_to_buffer(record, buffer_dir)
+    if verbose:
+        print(record_to_jsonl(record))
+
+
 def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
     """
-    Capture active window every `interval` seconds.
+    Capture active window every `interval` seconds with idle detection.
 
-    If buffer_dir is set, appends to daily JSONL files.
-    If verbose, also prints to stdout.
+    Behavior:
+      - Every capture includes idle_s (seconds since last input).
+      - Dedup: if app + title + text unchanged, skip the write.
+      - Idle threshold: when idle_s >= timeout, emit one idle marker
+        and pause captures until input resumes.
+      - On resume: emit a normal capture immediately.
+
+    The buffer timeline shows:
+      - Normal records with idle_s for continuous activity signal
+      - An idle marker when the user walks away
+      - A gap (no records) during absence
+      - A normal record when the user returns
     """
     if not check_accessibility():
         sys.exit(1)
 
-    print(f"Screen reader running (interval={interval}s). Ctrl+C to stop.", file=sys.stderr)
+    idle_timeout = _SCREEN_CFG.get("idle_timeout_seconds", 180)
+
+    print(
+        f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s). "
+        "Ctrl+C to stop.",
+        file=sys.stderr,
+    )
 
     last_record = None
+    is_idle = False
 
     while True:
+        idle_s = round(seconds_since_last_input(), 1)
+
+        # --- Idle state: user has walked away ---
+        if idle_s >= idle_timeout:
+            if not is_idle:
+                # Transition to idle: emit one marker
+                idle_record = {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "app": last_record["app"] if last_record else "Unknown",
+                    "title": last_record["title"] if last_record else "",
+                    "text": "",
+                    "url": None,
+                    "pid": last_record["pid"] if last_record else -1,
+                    "idle_s": idle_s,
+                    "idle": True,
+                }
+                _emit(idle_record, buffer_dir, verbose)
+                is_idle = True
+            # Don't capture while idle — just wait
+            time.sleep(interval)
+            continue
+
+        # --- Active state: user is present ---
+        if is_idle:
+            # Just came back from idle
+            is_idle = False
+            last_record = None  # force next capture to write (no dedup against stale data)
+
         record = capture_active_window_safe()
 
         if record is not None:
-            # Skip duplicate captures (same app + title + text)
+            # Dedup: skip if app + title + text unchanged
             is_duplicate = (
                 last_record is not None
                 and record["app"] == last_record["app"]
@@ -343,10 +418,7 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
             )
 
             if not is_duplicate:
-                if buffer_dir:
-                    append_to_buffer(record, buffer_dir)
-                if verbose:
-                    print(record_to_jsonl(record))
+                _emit(record, buffer_dir, verbose)
                 last_record = record
 
         time.sleep(interval)
