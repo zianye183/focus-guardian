@@ -4,3 +4,4 @@ pyobjc-framework-Cocoa==12.1
 pyobjc-framework-CoreText==12.1
 pyobjc-framework-Quartz==12.1
 PyYAML==6.0.3
+aw-client==0.5.15
