@@ -1,0 +1,82 @@
+# Focus Guardian configuration
+
+screen_reader:
+  interval_seconds: 3.0
+  max_text_length: 20000
+  ax_tree_depth: 5               # native apps
+  ax_web_area_search_depth: 10   # how deep to search for AXWebArea node
+  ax_web_content_depth: 15       # how deep to extract text inside AXWebArea
+
+activitywatch:
+  api_url: "http://localhost:5600/api/0"
+  poll_interval_seconds: 5
+
+judgment:
+  model: "claude-haiku-4-5-20251001"
+  cooldown_seconds: 600        # 10 minutes default
+  cooldown_extended_seconds: 1800  # 30 minutes after "Not now"
+  buffer_window_minutes: 10
+
+reflection:
+  model: "claude-sonnet-4-6-20260514"
+  # Runs manually or via cron — not in the daemon loop
+
+distraction_apps:
+  - "Twitter"
+  - "Reddit"
+  - "YouTube"
+  - "Instagram"
+  - "TikTok"
+
+# Apps where deep focus sessions should not be interrupted
+focus_apps:
+  - "Code"          # VS Code
+  - "Terminal"
+  - "iTerm2"
+  - "Cursor"
+  - "Xcode"
+
+# ---------------------------------------------------------------------------
+# Privacy — sensitive data filtering
+# ---------------------------------------------------------------------------
+privacy:
+  # Layer 1: App blocklist — never read from these apps at all.
+  # Capture returns app name + "[blocked]" so the timeline still shows
+  # that you were in the app, but no content is read.
+  blocked_apps:
+    - "1Password"
+    - "Bitwarden"
+    - "LastPass"
+    - "Dashlane"
+    - "KeePassXC"
+    - "Keychain Access"
+    - "Passwords"          # macOS built-in Passwords app
+
+  # Layer 2: Private/hidden window detection is automatic (no config needed).
+  # Skips: hidden apps, private browser windows (detected via title heuristics).
+
+  # Layer 3: Sensitive AX field types to skip when walking the UI tree.
+  # AXSecureTextField = password fields. These are never read.
+  blocked_ax_subroles:
+    - "AXSecureTextField"
+
+  # Layer 4: Sensitive URL parameter keys to strip before storage.
+  # If a URL contains ?token=abc123, the parameter is redacted.
+  sensitive_url_keys:
+    - "token"
+    - "auth"
+    - "password"
+    - "passwd"
+    - "secret"
+    - "key"
+    - "api_key"
+    - "apikey"
+    - "access_token"
+    - "refresh_token"
+    - "session"
+    - "signature"
+    - "billing"
+    - "credit"
+    - "card"
+    - "cvv"
+    - "ssn"

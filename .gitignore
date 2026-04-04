@@ -1,0 +1,10 @@
+.venv/
+data/
+data/buffer/
+data/soul-backups/
+__pycache__/
+*.pyc
+.env
+soul.yaml
+soul.md
+rules.yaml
