@@ -37,6 +37,7 @@ from config import CONFIG
 from db import init_db, create_capture
 from dedup import should_keep
 from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_url, scrub_text_urls
+from ax_observer import start_observing, stop_observing
 
 _SCREEN_CFG = CONFIG["screen_reader"]
 _IDLE_TIMEOUT = _SCREEN_CFG.get("idle_timeout_seconds", 180)
@@ -346,10 +347,11 @@ def run_continuous(interval=3.0, verbose=False):
     """
     Capture active window every `interval` seconds, dedup, and store in SQLite.
 
-    Two capture modes run simultaneously:
+    Three capture modes run simultaneously:
       1. Polling (every `interval` seconds): steady-state monitoring with dedup.
-      2. NSWorkspace observer: fires instantly on app activation. Captures
-         the moment of transition before the poll would catch it.
+      2. NSWorkspace observer: fires instantly on app activation (app switch).
+      3. AXObserver: fires instantly on focused window change within an app
+         (e.g., switching between two PDFs in Preview).
 
     Behavior:
       - Every capture includes idle_s (seconds since last input).
@@ -368,7 +370,7 @@ def run_continuous(interval=3.0, verbose=False):
 
     print(
         f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s, "
-        f"db=SQLite, instant_transitions=on). Ctrl+C to stop.",
+        f"db=SQLite, instant_transitions=on, window_observer=on). Ctrl+C to stop.",
         file=sys.stderr,
     )
 
@@ -377,10 +379,11 @@ def run_continuous(interval=3.0, verbose=False):
         "last_kept": None,
     }
 
-    def _on_app_activated(notification):
+    def _on_window_changed():
         """
-        NSWorkspace observer callback: fires instantly when user switches apps.
-        Captures screen text immediately so we catch what pulled their attention.
+        AXObserver callback: fires when focused window changes within an app.
+        Captures screen text immediately to detect window switches (e.g.,
+        switching between two PDFs in Preview).
         """
         record = capture_active_window_safe()
         if record is None:
@@ -388,6 +391,24 @@ def run_continuous(interval=3.0, verbose=False):
 
         record = {**record, "transition": True}
         _try_store(record, state, conn, verbose)
+
+    def _on_app_activated(notification):
+        """
+        NSWorkspace observer callback: fires instantly when user switches apps.
+        Captures screen text immediately so we catch what pulled their attention.
+        Also sets up an AXObserver on the new app to detect window switches.
+        """
+        record = capture_active_window_safe()
+        if record is None:
+            return
+
+        record = {**record, "transition": True}
+        _try_store(record, state, conn, verbose)
+
+        # Set up AX observer on the new app for window focus changes
+        pid = record.get("pid")
+        if pid and pid > 0:
+            start_observing(pid, _on_window_changed)
 
     # Register the NSWorkspace observer for app activation events
     from AppKit import NSNotificationCenter
@@ -399,6 +420,11 @@ def run_continuous(interval=3.0, verbose=False):
         None,   # deliver on posting thread
         _on_app_activated,
     )
+
+    # Set up AX observer for the currently frontmost app
+    initial = _get_frontmost_app()
+    if initial and initial.get("pid"):
+        start_observing(initial["pid"], _on_window_changed)
 
     is_idle = False
 
