@@ -3,9 +3,18 @@
 screen_reader:
   interval_seconds: 3.0
   max_text_length: 20000
+  idle_timeout_seconds: 180      # 3 min no input → idle marker emitted, captures paused
   ax_tree_depth: 5               # native apps
   ax_web_area_search_depth: 10   # how deep to search for AXWebArea node
   ax_web_content_depth: 15       # how deep to extract text inside AXWebArea
+
+dedup:
+  similarity_threshold: 0.85    # text similarity ratio to consider duplicate (0.0-1.0)
+  forced_snapshot_seconds: 45   # always keep a record after this many seconds, even if duplicate
+  max_text_compare_length: 2000 # truncate text before comparison for performance
+
+database:
+  db_path: "data/focus_guardian.db"   # relative to project root
 
 activitywatch:
   api_url: "http://localhost:5600/api/0"

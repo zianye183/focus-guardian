@@ -44,6 +44,16 @@ def _afk_bucket_id():
 # Event → buffer record conversion
 # ---------------------------------------------------------------------------
 
+def _parse_ts_for_sort(ts_str):
+    """Parse an ISO timestamp string for reliable sorting.
+
+    Handles both 'Z' and '+00:00' suffixes correctly, unlike
+    lexicographic string comparison.
+    """
+    s = ts_str.replace("Z", "+00:00")
+    return datetime.fromisoformat(s)
+
+
 def _event_to_record(event, source_bucket):
     """Convert an aw_core Event to our buffer-compatible dict."""
     ts = event.timestamp
@@ -59,7 +69,7 @@ def _event_to_record(event, source_bucket):
         "source": "aw",
         "bucket": source_bucket,
         "duration": duration,
-        "data": dict(event.data),
+        "data": dict(event.data) if event.data is not None else {},
     }
 
 
@@ -138,7 +148,7 @@ class AWRestClient:
         afk_records = self.get_afk_events(limit=-1, start=start, end=now)
 
         combined = window_records + afk_records
-        combined.sort(key=lambda r: r["ts"])
+        combined.sort(key=lambda r: _parse_ts_for_sort(r["ts"]))
         return combined
 
 
@@ -186,6 +196,12 @@ class AWDirectClient:
         events = bucket.get(limit=limit, starttime=start, endtime=end)
         return [_event_to_record(e, bucket_id) for e in events]
 
+    # TODO: get_window_events / get_afk_events call _ensure_datastore
+    # (via _get_events) which can raise OSError if the DB can't be opened.
+    # Unlike AWRestClient, these public methods have no try/except guard.
+    # Callers (AWClient) catch the exception, but direct users of
+    # AWDirectClient will get unhandled errors. Add try/except + return [].
+
     def get_window_events(self, limit=100, start=None, end=None):
         return self._get_events(_window_bucket_id(), limit, start, end)
 
@@ -200,7 +216,7 @@ class AWDirectClient:
         afk_records = self.get_afk_events(limit=-1, start=start, end=now)
 
         combined = window_records + afk_records
-        combined.sort(key=lambda r: r["ts"])
+        combined.sort(key=lambda r: _parse_ts_for_sort(r["ts"]))
         return combined
 
 
@@ -223,7 +239,13 @@ class AWClient:
         self._mode = None  # "rest", "direct", or None
 
     def _active_client(self):
-        """Return the currently active client, probing if needed."""
+        """Return the currently active client, probing if needed.
+
+        TODO: Once mode is cached, this returns the cached client without
+        re-checking liveness. If aw-server dies mid-session, all calls
+        fail until check_connection() is explicitly called. Consider
+        adding a TTL or periodic re-probe.
+        """
         if self._mode == "rest":
             return self._rest
         if self._mode == "direct":

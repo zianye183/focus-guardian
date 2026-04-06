@@ -233,7 +233,10 @@ def capture_active_window():
             # Extract URL from AXWebArea (works on Chromium, Safari, Electron)
             url_val = _ax_attr(web_area, "AXURL")
             if url_val is not None:
-                url = str(url_val)
+                url_str = str(url_val)
+                # Filter out internal Electron/app URLs (file:// to .asar bundles)
+                if not url_str.startswith("file://"):
+                    url = url_str
 
             raw_texts = _extract_text_from_element(web_area, max_depth=_SCREEN_CFG.get("ax_web_content_depth", 15))
         else:
@@ -317,6 +320,37 @@ def check_accessibility():
 
 
 # ---------------------------------------------------------------------------
+# Transition detection
+# ---------------------------------------------------------------------------
+
+def _is_transition(record, last_record):
+    """
+    Detect if this capture represents a meaningful transition.
+
+    A transition is: app changed, or URL changed (new page),
+    or window title changed significantly.
+    """
+    if last_record is None:
+        return False
+
+    # App switch — always a transition
+    if record.get("app") != last_record.get("app"):
+        return True
+
+    # URL changed — navigated to a new page
+    new_url = record.get("url")
+    old_url = last_record.get("url")
+    if new_url and old_url and new_url != old_url:
+        return True
+
+    # New URL appeared (went from non-browser to browser)
+    if new_url and not old_url:
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
 
@@ -348,7 +382,13 @@ def _emit(record, buffer_dir, verbose):
 
 def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
     """
-    Capture active window every `interval` seconds with idle detection.
+    Capture active window every `interval` seconds with idle detection
+    and instant transition captures.
+
+    Two capture modes run simultaneously:
+      1. Polling (every `interval` seconds): steady-state monitoring with dedup.
+      2. NSWorkspace observer: fires instantly on app activation. Captures
+         the moment of transition before the poll would catch it.
 
     Behavior:
       - Every capture includes idle_s (seconds since last input).
@@ -356,12 +396,7 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
       - Idle threshold: when idle_s >= timeout, emit one idle marker
         and pause captures until input resumes.
       - On resume: emit a normal capture immediately.
-
-    The buffer timeline shows:
-      - Normal records with idle_s for continuous activity signal
-      - An idle marker when the user walks away
-      - A gap (no records) during absence
-      - A normal record when the user returns
+      - Transition captures are tagged with "transition": true.
     """
     if not check_accessibility():
         sys.exit(1)
@@ -369,12 +404,57 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
     idle_timeout = _SCREEN_CFG.get("idle_timeout_seconds", 180)
 
     print(
-        f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s). "
-        "Ctrl+C to stop.",
+        f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s, "
+        f"instant_transitions=on). Ctrl+C to stop.",
         file=sys.stderr,
     )
 
-    last_record = None
+    # Shared mutable state between the observer callback and the poll loop
+    state = {
+        "last_record": None,
+        "is_idle": False,
+        "buffer_dir": buffer_dir,
+        "verbose": verbose,
+    }
+
+    def _on_app_activated(notification):
+        """
+        NSWorkspace observer callback: fires instantly when user switches apps.
+        Captures screen text immediately so we catch what pulled their attention.
+        """
+        record = capture_active_window_safe()
+        if record is None:
+            return
+
+        last = state["last_record"]
+
+        # Only emit if this is genuinely different from the last capture
+        is_duplicate = (
+            last is not None
+            and record["app"] == last["app"]
+            and record["title"] == last["title"]
+        )
+        if is_duplicate:
+            return
+
+        record = {**record, "transition": True}
+        _emit(record, state["buffer_dir"], state["verbose"])
+        state["last_record"] = record
+
+    # Register the NSWorkspace observer for app activation events
+    from AppKit import NSNotificationCenter
+    workspace = NSWorkspace.sharedWorkspace()
+    nc = workspace.notificationCenter()
+    nc.addObserverForName_object_queue_usingBlock_(
+        "NSWorkspaceDidActivateApplicationNotification",
+        None,   # observe all objects
+        None,   # deliver on posting thread
+        _on_app_activated,
+    )
+
+    # Run the poll loop. The observer fires independently via the run loop
+    # which gets pumped implicitly by PyObjC during sleep/idle.
+    last_record = state["last_record"]
     is_idle = False
 
     while True:
@@ -383,43 +463,41 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
         # --- Idle state: user has walked away ---
         if idle_s >= idle_timeout:
             if not is_idle:
-                # Transition to idle: emit one marker
+                last = state["last_record"]
                 idle_record = {
                     "ts": datetime.now(timezone.utc).isoformat(),
-                    "app": last_record["app"] if last_record else "Unknown",
-                    "title": last_record["title"] if last_record else "",
+                    "app": last["app"] if last else "Unknown",
+                    "title": last["title"] if last else "",
                     "text": "",
                     "url": None,
-                    "pid": last_record["pid"] if last_record else -1,
+                    "pid": last["pid"] if last else -1,
                     "idle_s": idle_s,
                     "idle": True,
                 }
                 _emit(idle_record, buffer_dir, verbose)
                 is_idle = True
-            # Don't capture while idle — just wait
             time.sleep(interval)
             continue
 
         # --- Active state: user is present ---
         if is_idle:
-            # Just came back from idle
             is_idle = False
-            last_record = None  # force next capture to write (no dedup against stale data)
+            state["last_record"] = None
 
         record = capture_active_window_safe()
 
         if record is not None:
-            # Dedup: skip if app + title + text unchanged
+            last = state["last_record"]
             is_duplicate = (
-                last_record is not None
-                and record["app"] == last_record["app"]
-                and record["title"] == last_record["title"]
-                and record["text"] == last_record["text"]
+                last is not None
+                and record["app"] == last["app"]
+                and record["title"] == last["title"]
+                and record["text"] == last["text"]
             )
 
             if not is_duplicate:
                 _emit(record, buffer_dir, verbose)
-                last_record = record
+                state["last_record"] = record
 
         time.sleep(interval)
 
