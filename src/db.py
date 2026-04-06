@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS captures (
     url TEXT,
     idle_s REAL,
     idle BOOLEAN DEFAULT FALSE,
+    filtered TEXT,
+    transition BOOLEAN DEFAULT FALSE,
     pid INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts);
@@ -160,8 +162,8 @@ def create_capture(conn: sqlite3.Connection, capture: dict) -> int:
     """
     cursor = conn.execute(
         """
-        INSERT INTO captures (ts, app, title, text, text_raw, url, idle_s, idle, pid)
-        VALUES (:ts, :app, :title, :text, :text_raw, :url, :idle_s, :idle, :pid)
+        INSERT INTO captures (ts, app, title, text, text_raw, url, idle_s, idle, filtered, transition, pid)
+        VALUES (:ts, :app, :title, :text, :text_raw, :url, :idle_s, :idle, :filtered, :transition, :pid)
         """,
         {
             "ts": capture["ts"],
@@ -172,6 +174,8 @@ def create_capture(conn: sqlite3.Connection, capture: dict) -> int:
             "url": capture.get("url"),
             "idle_s": capture.get("idle_s"),
             "idle": capture.get("idle", False),
+            "filtered": capture.get("filtered"),
+            "transition": capture.get("transition", False),
             "pid": capture.get("pid"),
         },
     )

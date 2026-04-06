@@ -60,6 +60,8 @@ def _make_capture(**overrides):
         "url": "https://google.com/search?q=focus+guardian",
         "idle_s": 0.5,
         "idle": False,
+        "filtered": None,
+        "transition": False,
         "pid": 1234,
     }
     return {**defaults, **overrides}
@@ -168,6 +170,8 @@ class TestCreateCapture:
         cap = _make_capture(
             text_raw="raw text before normalization",
             idle=True,
+            filtered="app_blocked",
+            transition=True,
         )
         cap_id = create_capture(db, cap)
         row = db.execute("SELECT * FROM captures WHERE id = ?", (cap_id,)).fetchone()
@@ -183,14 +187,16 @@ class TestCreateCapture:
         assert row_dict["url"] == cap["url"]
         assert row_dict["idle_s"] == cap["idle_s"]
         assert row_dict["idle"] == 1  # SQLite stores bool as int
+        assert row_dict["filtered"] == "app_blocked"
+        assert row_dict["transition"] == 1  # SQLite stores bool as int
         assert row_dict["pid"] == cap["pid"]
 
     def test_nullable_fields(self, db):
-        """text, text_raw, url, idle_s, pid can all be None."""
-        cap = _make_capture(text=None, text_raw=None, url=None, idle_s=None, pid=None)
+        """text, text_raw, url, idle_s, filtered, pid can all be None."""
+        cap = _make_capture(text=None, text_raw=None, url=None, idle_s=None, filtered=None, pid=None)
         cap_id = create_capture(db, cap)
-        row = db.execute("SELECT text, text_raw, url, idle_s, pid FROM captures WHERE id = ?", (cap_id,)).fetchone()
-        assert row == (None, None, None, None, None)
+        row = db.execute("SELECT text, text_raw, url, idle_s, filtered, pid FROM captures WHERE id = ?", (cap_id,)).fetchone()
+        assert row == (None, None, None, None, None, None)
 
     def test_required_fields_enforced(self, db):
         """ts, app, title are NOT NULL — should fail if missing."""
@@ -225,6 +231,20 @@ class TestCreateCapture:
         cap_id = create_capture(db, cap)
         row = db.execute("SELECT text FROM captures WHERE id = ?", (cap_id,)).fetchone()
         assert len(row[0]) == 20000
+
+    def test_filtered_field_stored(self, db):
+        """filtered column stores the filter reason (app_blocked, private_window, sensitive_page)."""
+        cap = _make_capture(filtered="app_blocked")
+        cap_id = create_capture(db, cap)
+        row = db.execute("SELECT filtered FROM captures WHERE id = ?", (cap_id,)).fetchone()
+        assert row[0] == "app_blocked"
+
+    def test_transition_field_stored(self, db):
+        """transition column stores whether this capture was an app-switch transition."""
+        cap = _make_capture(transition=True)
+        cap_id = create_capture(db, cap)
+        row = db.execute("SELECT transition FROM captures WHERE id = ?", (cap_id,)).fetchone()
+        assert row[0] == 1  # SQLite stores bool as int
 
 
 # ---------------------------------------------------------------------------
