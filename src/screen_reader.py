@@ -331,7 +331,11 @@ def _try_store(record, state, conn, verbose):
     Updates state["last_kept"] on success.
     """
     if should_keep(record, state["last_kept"]):
-        create_capture(conn, record)
+        try:
+            create_capture(conn, record)
+        except Exception as e:
+            print(f"[screen_reader] DB write failed: {e}", file=sys.stderr)
+            return
         state["last_kept"] = record
         if verbose:
             print(json.dumps(record, ensure_ascii=False))
@@ -370,7 +374,6 @@ def run_continuous(interval=3.0, verbose=False):
     # Shared state between the observer callback and the poll loop
     state = {
         "last_kept": None,
-        "is_idle": False,
     }
 
     def _on_app_activated(notification):
