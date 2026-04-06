@@ -13,10 +13,11 @@ from pathlib import Path
 from config import CONFIG
 
 _DB_CFG = CONFIG.get("database", {})
+_PROJECT_ROOT = Path(__file__).parent.parent
 _DEFAULT_DB_PATH = str(
-    Path(CONFIG.get("database", {}).get("db_path", ""))
+    _PROJECT_ROOT / _DB_CFG["db_path"]
     if _DB_CFG.get("db_path")
-    else Path(__file__).parent.parent / "data" / "focus_guardian.db"
+    else _PROJECT_ROOT / "data" / "focus_guardian.db"
 )
 
 _SCHEMA_SQL = """
