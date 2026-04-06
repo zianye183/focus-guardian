@@ -4,7 +4,8 @@ Screen text reader for Focus Guardian.
 Reads visible text + app name from the active window using macOS
 Accessibility APIs via pyobjc. Uses System Events via AppleScript to
 detect the true frontmost application (not just the terminal running
-this script). Outputs JSONL records to stdout or appends to a buffer file.
+this script). Deduplicates captures via similarity matching and stores
+results directly in SQLite.
 
 Requires: macOS Accessibility permission in
 System Settings → Privacy & Security → Accessibility
