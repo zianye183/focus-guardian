@@ -27,6 +27,11 @@ from ApplicationServices import (
     AXUIElementCreateApplication,
     AXUIElementCopyAttributeValue,
 )
+from CoreFoundation import (
+    CFRunLoopGetCurrent,
+    CFRunLoopRunInMode,
+    kCFRunLoopDefaultMode,
+)
 from Quartz.CoreGraphics import (
     CGEventSourceSecondsSinceLastEventType,
     kCGEventSourceStateHIDSystemState,
@@ -447,7 +452,7 @@ def run_continuous(interval=3.0, verbose=False):
                 }
                 _try_store(idle_record, state, conn, verbose)
                 is_idle = True
-            time.sleep(interval)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, interval, False)
             continue
 
         # --- Active state: user is present ---
@@ -460,7 +465,7 @@ def run_continuous(interval=3.0, verbose=False):
         if record is not None:
             _try_store(record, state, conn, verbose)
 
-        time.sleep(interval)
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, interval, False)
 
 
 # ---------------------------------------------------------------------------
