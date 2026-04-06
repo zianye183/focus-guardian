@@ -17,7 +17,6 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 signal.signal(signal.SIGINT, lambda *_: (print("\nStopped.", file=sys.stderr), sys.exit(0)))
 
@@ -34,6 +33,8 @@ from Quartz.CoreGraphics import (
 )
 
 from config import CONFIG
+from db import init_db, create_capture
+from dedup import should_keep
 from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_url, scrub_text_urls
 
 _SCREEN_CFG = CONFIG["screen_reader"]
@@ -320,70 +321,25 @@ def check_accessibility():
 
 
 # ---------------------------------------------------------------------------
-# Transition detection
+# Storage: dedup + write to SQLite
 # ---------------------------------------------------------------------------
 
-def _is_transition(record, last_record):
+def _try_store(record, state, conn, verbose):
     """
-    Detect if this capture represents a meaningful transition.
+    Decide whether to keep this record (via dedup) and store it in SQLite.
 
-    A transition is: app changed, or URL changed (new page),
-    or window title changed significantly.
+    Updates state["last_kept"] on success.
     """
-    if last_record is None:
-        return False
-
-    # App switch — always a transition
-    if record.get("app") != last_record.get("app"):
-        return True
-
-    # URL changed — navigated to a new page
-    new_url = record.get("url")
-    old_url = last_record.get("url")
-    if new_url and old_url and new_url != old_url:
-        return True
-
-    # New URL appeared (went from non-browser to browser)
-    if new_url and not old_url:
-        return True
-
-    return False
+    if should_keep(record, state["last_kept"]):
+        create_capture(conn, record)
+        state["last_kept"] = record
+        if verbose:
+            print(json.dumps(record, ensure_ascii=False))
 
 
-# ---------------------------------------------------------------------------
-# Output helpers
-# ---------------------------------------------------------------------------
-
-def record_to_jsonl(record):
-    """Serialize a capture record to a JSONL line."""
-    return json.dumps(record, ensure_ascii=False)
-
-
-def append_to_buffer(record, buffer_dir="data/buffer"):
-    """Append a record to today's buffer file."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    buffer_path = Path(buffer_dir) / f"{today}.jsonl"
-    buffer_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(buffer_path, "a", encoding="utf-8") as f:
-        f.write(record_to_jsonl(record) + "\n")
-
-
-# ---------------------------------------------------------------------------
-# Main: continuous capture loop
-# ---------------------------------------------------------------------------
-
-def _emit(record, buffer_dir, verbose):
-    """Write a record to buffer and/or stdout."""
-    if buffer_dir:
-        append_to_buffer(record, buffer_dir)
-    if verbose:
-        print(record_to_jsonl(record))
-
-
-def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
+def run_continuous(interval=3.0, verbose=False):
     """
-    Capture active window every `interval` seconds with idle detection
-    and instant transition captures.
+    Capture active window every `interval` seconds, dedup, and store in SQLite.
 
     Two capture modes run simultaneously:
       1. Polling (every `interval` seconds): steady-state monitoring with dedup.
@@ -392,29 +348,29 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
 
     Behavior:
       - Every capture includes idle_s (seconds since last input).
-      - Dedup: if app + title + text unchanged, skip the write.
-      - Idle threshold: when idle_s >= timeout, emit one idle marker
+      - Dedup via should_keep(): similarity-based, with forced snapshots.
+      - Idle threshold: when idle_s >= timeout, store one idle marker
         and pause captures until input resumes.
-      - On resume: emit a normal capture immediately.
-      - Transition captures are tagged with "transition": true.
+      - On resume: store a normal capture immediately.
+      - Transition captures are tagged with transition=True.
     """
     if not check_accessibility():
         sys.exit(1)
 
     idle_timeout = _SCREEN_CFG.get("idle_timeout_seconds", 180)
 
+    conn = init_db()
+
     print(
         f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s, "
-        f"instant_transitions=on). Ctrl+C to stop.",
+        f"db=SQLite, instant_transitions=on). Ctrl+C to stop.",
         file=sys.stderr,
     )
 
-    # Shared mutable state between the observer callback and the poll loop
+    # Shared state between the observer callback and the poll loop
     state = {
-        "last_record": None,
+        "last_kept": None,
         "is_idle": False,
-        "buffer_dir": buffer_dir,
-        "verbose": verbose,
     }
 
     def _on_app_activated(notification):
@@ -426,20 +382,8 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
         if record is None:
             return
 
-        last = state["last_record"]
-
-        # Only emit if this is genuinely different from the last capture
-        is_duplicate = (
-            last is not None
-            and record["app"] == last["app"]
-            and record["title"] == last["title"]
-        )
-        if is_duplicate:
-            return
-
         record = {**record, "transition": True}
-        _emit(record, state["buffer_dir"], state["verbose"])
-        state["last_record"] = record
+        _try_store(record, state, conn, verbose)
 
     # Register the NSWorkspace observer for app activation events
     from AppKit import NSNotificationCenter
@@ -452,9 +396,6 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
         _on_app_activated,
     )
 
-    # Run the poll loop. The observer fires independently via the run loop
-    # which gets pumped implicitly by PyObjC during sleep/idle.
-    last_record = state["last_record"]
     is_idle = False
 
     while True:
@@ -463,7 +404,7 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
         # --- Idle state: user has walked away ---
         if idle_s >= idle_timeout:
             if not is_idle:
-                last = state["last_record"]
+                last = state["last_kept"]
                 idle_record = {
                     "ts": datetime.now(timezone.utc).isoformat(),
                     "app": last["app"] if last else "Unknown",
@@ -474,7 +415,7 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
                     "idle_s": idle_s,
                     "idle": True,
                 }
-                _emit(idle_record, buffer_dir, verbose)
+                _try_store(idle_record, state, conn, verbose)
                 is_idle = True
             time.sleep(interval)
             continue
@@ -482,22 +423,12 @@ def run_continuous(interval=3.0, buffer_dir=None, verbose=False):
         # --- Active state: user is present ---
         if is_idle:
             is_idle = False
-            state["last_record"] = None
+            state["last_kept"] = None
 
         record = capture_active_window_safe()
 
         if record is not None:
-            last = state["last_record"]
-            is_duplicate = (
-                last is not None
-                and record["app"] == last["app"]
-                and record["title"] == last["title"]
-                and record["text"] == last["text"]
-            )
-
-            if not is_duplicate:
-                _emit(record, buffer_dir, verbose)
-                state["last_record"] = record
+            _try_store(record, state, conn, verbose)
 
         time.sleep(interval)
 
@@ -516,16 +447,12 @@ if __name__ == "__main__":
         help=f"Capture interval in seconds (default: {default_interval})",
     )
     parser.add_argument(
-        "--buffer-dir", type=str, default=None,
-        help="Directory to write daily JSONL buffer files (e.g. data/buffer)",
-    )
-    parser.add_argument(
         "--verbose", action="store_true",
-        help="Print captures to stdout",
+        help="Print captures to stdout as JSON",
     )
     parser.add_argument(
         "--once", action="store_true",
-        help="Capture once and print, then exit",
+        help="Capture once and print, then exit (does not store to DB)",
     )
     parser.add_argument(
         "--delay", type=float, default=0,
@@ -548,7 +475,7 @@ if __name__ == "__main__":
         if not check_accessibility():
             sys.exit(1)
         if args.delay > 0:
-            print(f"Waiting {args.delay}s — switch to the app you want to test...", file=sys.stderr)
+            print(f"Waiting {args.delay}s -- switch to the app you want to test...", file=sys.stderr)
             time.sleep(args.delay)
         record = capture_active_window_safe()
         if record:
@@ -557,6 +484,5 @@ if __name__ == "__main__":
 
     run_continuous(
         interval=args.interval,
-        buffer_dir=args.buffer_dir,
         verbose=args.verbose,
     )
