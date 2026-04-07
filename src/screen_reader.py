@@ -20,7 +20,6 @@ from datetime import datetime, timezone
 
 signal.signal(signal.SIGINT, lambda *_: (print("\nStopped.", file=sys.stderr), sys.exit(0)))
 
-from AppKit import NSRunningApplication, NSWorkspace
 from ApplicationServices import (
     AXIsProcessTrusted,
     AXUIElementCreateApplication,
@@ -56,49 +55,6 @@ def seconds_since_last_input():
     return CGEventSourceSecondsSinceLastEventType(
         kCGEventSourceStateHIDSystemState, kCGAnyInputEventType
     )
-
-
-# ---------------------------------------------------------------------------
-# Frontmost app detection
-# ---------------------------------------------------------------------------
-
-def _get_frontmost_app():
-    """
-    Get the true frontmost application via System Events AppleScript.
-
-    NSWorkspace.frontmostApplication() and isActive() return the app
-    that owns the calling process (our terminal), not the user's actual
-    foreground app. System Events tracks the real frontmost process
-    independently, so we use AppleScript as the primary method.
-    """
-    try:
-        result = subprocess.run(
-            ['osascript', '-e',
-             'tell application "System Events"\n'
-             '  set frontApp to first application process whose frontmost is true\n'
-             '  return {name of frontApp, unix id of frontApp}\n'
-             'end tell'],
-            capture_output=True, text=True, timeout=2,
-        )
-        if result.returncode == 0:
-            parts = result.stdout.strip().split(", ")
-            if len(parts) == 2:
-                name = parts[0]
-                pid = int(parts[1])
-                return {"name": name, "pid": pid}
-    except Exception:
-        pass
-
-    # Fallback: NSWorkspace (less reliable from a terminal process)
-    workspace = NSWorkspace.sharedWorkspace()
-    for app in workspace.runningApplications():
-        if app.isActive():
-            return {
-                "name": app.localizedName(),
-                "pid": app.processIdentifier(),
-            }
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -288,23 +244,17 @@ def capture_window(pid, app_name, ax_window, window_id):
 
 def capture_active_window():
     """
-    Capture the frontmost app's active window. Used by --once CLI mode.
-
-    Thin wrapper: resolves the frontmost app via _get_frontmost_app(), then
-    delegates all content extraction to capture_window().
+    Capture the frontmost visible window. Used by --once CLI mode.
     """
-    frontmost = _get_frontmost_app()
-    if frontmost is None:
+    windows = get_visible_windows()
+    if not windows:
         return None
-
-    ax_app = AXUIElementCreateApplication(frontmost["pid"])
-    ax_window = _ax_attr(ax_app, "AXFocusedWindow")
-
+    w = windows[0]  # First = frontmost (CGWindowList order)
     return capture_window(
-        pid=frontmost["pid"],
-        app_name=frontmost["name"],
-        ax_window=ax_window,
-        window_id=None,
+        pid=w["pid"],
+        app_name=w["app"],
+        ax_window=w["ax_window"],
+        window_id=w["window_id"],
     )
 
 
