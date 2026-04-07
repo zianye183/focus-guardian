@@ -14,7 +14,6 @@ System Settings → Privacy & Security → Accessibility
 
 import json
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -39,10 +38,10 @@ from Quartz.CoreGraphics import (
 )
 
 from config import CONFIG
-from db import init_db, create_capture
+from db import init_db, create_capture, create_layout
 from dedup import should_keep
 from privacy import is_app_blocked, is_private_window, is_app_hidden, is_secure_field, is_sensitive_page, scrub_url, scrub_text_urls
-from ax_observer import start_observing, stop_observing
+from visible_windows import get_visible_windows
 
 _SCREEN_CFG = CONFIG["screen_reader"]
 _IDLE_TIMEOUT = _SCREEN_CFG.get("idle_timeout_seconds", 180)
@@ -347,40 +346,28 @@ def check_accessibility():
 # Storage: dedup + write to SQLite
 # ---------------------------------------------------------------------------
 
-def _try_store(record, state, conn, verbose):
-    """
-    Decide whether to keep this record (via dedup) and store it in SQLite.
-
-    Updates state["last_kept"] on success.
-    """
-    if should_keep(record, state["last_kept"]):
-        try:
-            create_capture(conn, record)
-        except Exception as e:
-            print(f"[screen_reader] DB write failed: {e}", file=sys.stderr)
-            return
-        state["last_kept"] = record
-        if verbose:
-            print(json.dumps(record, ensure_ascii=False))
+def _layout_key(windows):
+    """Hashable representation of current layout for change detection."""
+    return tuple(
+        (w["window_id"], w["app"], w["title"])
+        for w in windows
+    )
 
 
 def run_continuous(interval=3.0, verbose=False):
     """
-    Capture active window every `interval` seconds, dedup, and store in SQLite.
+    Capture all visible windows every `interval` seconds, dedup per window,
+    and store in SQLite.
 
-    Three capture modes run simultaneously:
-      1. Polling (every `interval` seconds): steady-state monitoring with dedup.
-      2. NSWorkspace observer: fires instantly on app activation (app switch).
-      3. AXObserver: fires instantly on focused window change within an app
-         (e.g., switching between two PDFs in Preview).
+    Two data streams written independently:
+      1. Layout table: written only when the set of visible windows changes.
+      2. Captures table: per-window content, deduped per window_id.
 
     Behavior:
       - Every capture includes idle_s (seconds since last input).
-      - Dedup via should_keep(): similarity-based, with forced snapshots.
-      - Idle threshold: when idle_s >= timeout, store one idle marker
+      - Dedup via should_keep(): similarity-based, per window_id.
+      - Idle threshold: when idle_s >= timeout, emit one idle marker
         and pause captures until input resumes.
-      - On resume: store a normal capture immediately.
-      - Transition captures are tagged with transition=True.
     """
     if not check_accessibility():
         sys.exit(1)
@@ -391,62 +378,13 @@ def run_continuous(interval=3.0, verbose=False):
 
     print(
         f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s, "
-        f"db=SQLite, instant_transitions=on, window_observer=on). Ctrl+C to stop.",
+        f"db=SQLite, multi_window=on). Ctrl+C to stop.",
         file=sys.stderr,
     )
 
-    # Shared state between the observer callback and the poll loop
-    state = {
-        "last_kept": None,
-    }
-
-    def _on_window_changed():
-        """
-        AXObserver callback: fires when focused window changes within an app.
-        Captures screen text immediately to detect window switches (e.g.,
-        switching between two PDFs in Preview).
-        """
-        record = capture_active_window_safe()
-        if record is None:
-            return
-
-        record = {**record, "transition": True}
-        _try_store(record, state, conn, verbose)
-
-    def _on_app_activated(notification):
-        """
-        NSWorkspace observer callback: fires instantly when user switches apps.
-        Captures screen text immediately so we catch what pulled their attention.
-        Also sets up an AXObserver on the new app to detect window switches.
-        """
-        record = capture_active_window_safe()
-        if record is None:
-            return
-
-        record = {**record, "transition": True}
-        _try_store(record, state, conn, verbose)
-
-        # Set up AX observer on the new app for window focus changes
-        pid = record.get("pid")
-        if pid and pid > 0:
-            start_observing(pid, _on_window_changed)
-
-    # Register the NSWorkspace observer for app activation events
-    from AppKit import NSNotificationCenter
-    workspace = NSWorkspace.sharedWorkspace()
-    nc = workspace.notificationCenter()
-    nc.addObserverForName_object_queue_usingBlock_(
-        "NSWorkspaceDidActivateApplicationNotification",
-        None,   # observe all objects
-        None,   # deliver on posting thread
-        _on_app_activated,
-    )
-
-    # Set up AX observer for the currently frontmost app
-    initial = _get_frontmost_app()
-    if initial and initial.get("pid"):
-        start_observing(initial["pid"], _on_window_changed)
-
+    # Per-window dedup state: {window_id: last_kept_record}
+    last_kept = {}
+    last_layout = None
     is_idle = False
 
     while True:
@@ -455,18 +393,23 @@ def run_continuous(interval=3.0, verbose=False):
         # --- Idle state: user has walked away ---
         if idle_s >= idle_timeout:
             if not is_idle:
-                last = state["last_kept"]
                 idle_record = {
                     "ts": datetime.now(timezone.utc).isoformat(),
-                    "app": last["app"] if last else "Unknown",
-                    "title": last["title"] if last else "",
+                    "app": "IDLE",
+                    "title": "",
                     "text": "",
                     "url": None,
-                    "pid": last["pid"] if last else -1,
+                    "pid": -1,
+                    "window_id": None,
                     "idle_s": idle_s,
                     "idle": True,
                 }
-                _try_store(idle_record, state, conn, verbose)
+                try:
+                    create_capture(conn, idle_record)
+                except Exception as e:
+                    print(f"[screen_reader] DB write failed: {e}", file=sys.stderr)
+                if verbose:
+                    print(json.dumps(idle_record, ensure_ascii=False))
                 is_idle = True
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, interval, False)
             continue
@@ -474,12 +417,64 @@ def run_continuous(interval=3.0, verbose=False):
         # --- Active state: user is present ---
         if is_idle:
             is_idle = False
-            state["last_kept"] = None
+            last_kept.clear()
+            last_layout = None
 
-        record = capture_active_window_safe()
+        windows = get_visible_windows()
 
-        if record is not None:
-            _try_store(record, state, conn, verbose)
+        # Skip animation frames (empty = Mission Control / Expose)
+        if not windows:
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, interval, False)
+            continue
+
+        # --- Layout change detection ---
+        current_layout = _layout_key(windows)
+        if current_layout != last_layout:
+            panes_json = json.dumps([
+                {
+                    "window_id": w["window_id"],
+                    "app": w["app"],
+                    "pid": w["pid"],
+                    "title": w["title"],
+                    "bounds": w["bounds"],
+                }
+                for w in windows
+            ], ensure_ascii=False)
+            try:
+                create_layout(conn, {
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "panes": panes_json,
+                })
+            except Exception as e:
+                print(f"[screen_reader] Layout write failed: {e}", file=sys.stderr)
+            last_layout = current_layout
+
+        # --- Per-window content capture ---
+        for win in windows:
+            try:
+                record = capture_window(
+                    pid=win["pid"],
+                    app_name=win["app"],
+                    ax_window=win["ax_window"],
+                    window_id=win["window_id"],
+                )
+            except Exception as e:
+                print(f"[screen_reader] Capture failed for {win['app']}: {e}", file=sys.stderr)
+                continue
+
+            if record is None:
+                continue
+
+            wid = win["window_id"]
+            if should_keep(record, last_kept.get(wid)):
+                try:
+                    create_capture(conn, record)
+                except Exception as e:
+                    print(f"[screen_reader] DB write failed: {e}", file=sys.stderr)
+                    continue
+                last_kept[wid] = record
+                if verbose:
+                    print(json.dumps(record, ensure_ascii=False))
 
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, interval, False)
 
