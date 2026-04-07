@@ -230,6 +230,11 @@ def capture_window(pid, app_name, ax_window, window_id):
                 "filtered": "sensitive_page",
             }
 
+    # Skip windows where AX returned nothing useful — background Arc tabs,
+    # animation frames where AX matched but content wasn't rendered yet, etc.
+    if not window_title and not visible_text:
+        return None
+
     return {
         "ts": ts,
         "app": app_name or "Unknown",

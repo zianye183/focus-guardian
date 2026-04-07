@@ -46,8 +46,8 @@ class TestCaptureWindowSignature:
             )
         assert result is None
 
-    def test_returns_dict_with_required_keys(self):
-        """Even with no AX window, should return a valid record."""
+    def test_returns_none_for_empty_content(self):
+        """Windows with no title and no text should be skipped."""
         with patch("screen_reader.is_app_blocked", return_value=False), \
              patch("screen_reader.is_app_hidden", return_value=False):
             result = capture_window(
@@ -56,10 +56,4 @@ class TestCaptureWindowSignature:
                 ax_window=None,
                 window_id=200,
             )
-        assert result is not None
-        assert "ts" in result
-        assert result["app"] == "Ghostty"
-        assert result["pid"] == 1234
-        assert result["window_id"] == 200
-        assert "title" in result
-        assert "text" in result
+        assert result is None
