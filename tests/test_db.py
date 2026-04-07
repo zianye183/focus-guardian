@@ -18,11 +18,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from db import (
     DB,
     create_capture,
+    create_layout,
     create_session,
     create_session_summary,
     get_captures,
     get_captures_by_app,
     get_captures_by_time_range,
+    get_latest_layout,
     get_session,
     get_session_summaries,
     get_sessions_by_time_range,
@@ -585,3 +587,57 @@ class TestEdgeCases:
 
         conn1.close()
         conn2.close()
+
+
+# ---------------------------------------------------------------------------
+# Layout table
+# ---------------------------------------------------------------------------
+
+class TestLayoutTable:
+    def test_layout_table_exists(self, db):
+        cursor = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='layout'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_layout_index_exists(self, db):
+        cursor = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_layout_ts'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_create_layout(self, db):
+        layout = {
+            "ts": "2026-04-06T10:00:00+00:00",
+            "panes": '[{"window_id": 123, "app": "Arc", "pid": 456, "title": "Google", "bounds": {"X": 0, "Y": 39, "Width": 855, "Height": 1068}}]',
+        }
+        row_id = create_layout(db, layout)
+        assert isinstance(row_id, int)
+        assert row_id >= 1
+
+    def test_get_latest_layout(self, db):
+        create_layout(db, {
+            "ts": "2026-04-06T10:00:00+00:00",
+            "panes": '[{"window_id": 100, "app": "Arc"}]',
+        })
+        create_layout(db, {
+            "ts": "2026-04-06T10:05:00+00:00",
+            "panes": '[{"window_id": 200, "app": "Obsidian"}]',
+        })
+        result = get_latest_layout(db)
+        assert result is not None
+        assert result["ts"] == "2026-04-06T10:05:00+00:00"
+        assert "Obsidian" in result["panes"]
+
+    def test_get_latest_layout_empty_db(self, db):
+        result = get_latest_layout(db)
+        assert result is None
+
+    def test_does_not_mutate_input(self, db):
+        layout = {
+            "ts": "2026-04-06T10:00:00+00:00",
+            "panes": '[{"window_id": 123, "app": "Arc"}]',
+        }
+        original = layout.copy()
+        create_layout(db, layout)
+        assert layout == original

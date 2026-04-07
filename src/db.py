@@ -39,6 +39,15 @@ CREATE TABLE IF NOT EXISTS captures (
 CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts);
 CREATE INDEX IF NOT EXISTS idx_captures_app ON captures(app);
 
+-- Layout snapshots: which windows are visible on screen.
+-- New entry only when the set of visible windows changes.
+CREATE TABLE IF NOT EXISTS layout (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    panes TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_layout_ts ON layout(ts);
+
 -- Sessions (grouped captures representing one coherent activity)
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY,
@@ -228,6 +237,43 @@ def get_captures_by_app(
         (app, limit),
     )
     return _fetchall_dicts(cursor)
+
+
+# ---------------------------------------------------------------------------
+# Layout
+# ---------------------------------------------------------------------------
+
+def create_layout(conn: sqlite3.Connection, layout: dict) -> int:
+    """
+    Insert a layout snapshot. Returns the new row ID.
+
+    layout["panes"] should be a JSON string of visible window info.
+    Does not mutate the input dict.
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO layout (ts, panes)
+        VALUES (:ts, :panes)
+        """,
+        {
+            "ts": layout["ts"],
+            "panes": layout["panes"],
+        },
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_latest_layout(conn: sqlite3.Connection) -> dict | None:
+    """Return the most recent layout snapshot, or None if empty."""
+    cursor = conn.execute(
+        "SELECT * FROM layout ORDER BY ts DESC LIMIT 1"
+    )
+    row = cursor.fetchone()
+    if row is None:
+        return None
+    keys = [desc[0] for desc in cursor.description]
+    return dict(zip(keys, row))
 
 
 # ---------------------------------------------------------------------------
