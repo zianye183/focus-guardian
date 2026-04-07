@@ -7,6 +7,7 @@ and session summaries, plus FTS5 full-text search over summaries.
 All database paths are configurable via config.yaml under the `database` key.
 """
 
+import datetime
 import sqlite3
 from pathlib import Path
 
@@ -39,8 +40,6 @@ CREATE TABLE IF NOT EXISTS captures (
 );
 CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts);
 CREATE INDEX IF NOT EXISTS idx_captures_app ON captures(app);
-CREATE INDEX IF NOT EXISTS idx_captures_window_ts ON captures(window_id, ts);
-
 -- Layout snapshots: which windows are visible on screen.
 -- New entry only when the set of visible windows changes.
 CREATE TABLE IF NOT EXISTS layout (
@@ -152,8 +151,6 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
     Tracks applied migrations in a simple metadata table so each migration
     runs exactly once, even across fresh schema creation and upgrades.
     """
-    import datetime
-
     conn.execute("""
         CREATE TABLE IF NOT EXISTS _migrations (
             name TEXT PRIMARY KEY,
@@ -173,8 +170,10 @@ def _run_migrations(conn: sqlite3.Connection) -> None:
         for stmt in statements:
             try:
                 conn.execute(stmt)
-            except Exception:
-                pass  # Column/index may already exist from fresh schema
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                if "already exists" not in msg and "duplicate column" not in msg:
+                    raise
         conn.execute(
             "INSERT INTO _migrations (name, applied_ts) VALUES (?, ?)",
             (name, datetime.datetime.now(datetime.timezone.utc).isoformat()),
