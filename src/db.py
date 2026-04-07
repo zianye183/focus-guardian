@@ -34,10 +34,12 @@ CREATE TABLE IF NOT EXISTS captures (
     idle BOOLEAN DEFAULT FALSE,
     filtered TEXT,
     transition BOOLEAN DEFAULT FALSE,
-    pid INTEGER
+    pid INTEGER,
+    window_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_captures_ts ON captures(ts);
 CREATE INDEX IF NOT EXISTS idx_captures_app ON captures(app);
+CREATE INDEX IF NOT EXISTS idx_captures_window_ts ON captures(window_id, ts);
 
 -- Layout snapshots: which windows are visible on screen.
 -- New entry only when the set of visible windows changes.
@@ -126,7 +128,58 @@ def init_db(db_path: str | None = None) -> sqlite3.Connection:
     conn.executescript(_FTS_TRIGGERS_SQL)
     conn.commit()
 
+    _run_migrations(conn)
+
     return conn
+
+
+_MIGRATIONS = [
+    # V3: Multi-window capture
+    (
+        "v3_window_id",
+        [
+            "ALTER TABLE captures ADD COLUMN window_id INTEGER",
+            "CREATE INDEX IF NOT EXISTS idx_captures_window_ts ON captures(window_id, ts)",
+        ],
+    ),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Apply pending schema migrations.
+
+    Tracks applied migrations in a simple metadata table so each migration
+    runs exactly once, even across fresh schema creation and upgrades.
+    """
+    import datetime
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _migrations (
+            name TEXT PRIMARY KEY,
+            applied_ts TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+
+    applied = {
+        row[0]
+        for row in conn.execute("SELECT name FROM _migrations").fetchall()
+    }
+
+    for name, statements in _MIGRATIONS:
+        if name in applied:
+            continue
+        for stmt in statements:
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass  # Column/index may already exist from fresh schema
+        conn.execute(
+            "INSERT INTO _migrations (name, applied_ts) VALUES (?, ?)",
+            (name, datetime.datetime.now(datetime.timezone.utc).isoformat()),
+        )
+        conn.commit()
 
 
 class DB:
@@ -172,8 +225,8 @@ def create_capture(conn: sqlite3.Connection, capture: dict) -> int:
     """
     cursor = conn.execute(
         """
-        INSERT INTO captures (ts, app, title, text, text_raw, url, idle_s, idle, filtered, transition, pid)
-        VALUES (:ts, :app, :title, :text, :text_raw, :url, :idle_s, :idle, :filtered, :transition, :pid)
+        INSERT INTO captures (ts, app, title, text, text_raw, url, idle_s, idle, filtered, transition, pid, window_id)
+        VALUES (:ts, :app, :title, :text, :text_raw, :url, :idle_s, :idle, :filtered, :transition, :pid, :window_id)
         """,
         {
             "ts": capture["ts"],
@@ -187,6 +240,7 @@ def create_capture(conn: sqlite3.Connection, capture: dict) -> int:
             "filtered": capture.get("filtered"),
             "transition": capture.get("transition", False),
             "pid": capture.get("pid"),
+            "window_id": capture.get("window_id"),
         },
     )
     conn.commit()

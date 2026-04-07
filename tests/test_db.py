@@ -65,6 +65,7 @@ def _make_capture(**overrides):
         "filtered": None,
         "transition": False,
         "pid": 1234,
+        "window_id": None,
     }
     return {**defaults, **overrides}
 
@@ -345,6 +346,36 @@ class TestGetCapturesByApp:
         create_capture(db, _make_capture(app="Arc"))
         rows = get_captures_by_app(db, "arc")
         assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# Captures: window_id column (V3)
+# ---------------------------------------------------------------------------
+
+class TestCaptureWindowId:
+    def test_window_id_stored(self, db):
+        cap = _make_capture(window_id=276330)
+        cap_id = create_capture(db, cap)
+        row = db.execute("SELECT window_id FROM captures WHERE id = ?", (cap_id,)).fetchone()
+        assert row[0] == 276330
+
+    def test_window_id_nullable(self, db):
+        """Pre-V3 captures have no window_id."""
+        cap = _make_capture()  # no window_id key
+        cap_id = create_capture(db, cap)
+        row = db.execute("SELECT window_id FROM captures WHERE id = ?", (cap_id,)).fetchone()
+        assert row[0] is None
+
+    def test_window_id_index_exists(self, db):
+        cursor = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_captures_window_ts'"
+        )
+        assert cursor.fetchone() is not None
+
+    def test_get_captures_includes_window_id(self, db):
+        cap_id = create_capture(db, _make_capture(window_id=12345))
+        rows = get_captures(db, capture_id=cap_id)
+        assert rows[0]["window_id"] == 12345
 
 
 # ---------------------------------------------------------------------------
