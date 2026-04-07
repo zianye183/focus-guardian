@@ -165,26 +165,21 @@ def _extract_text_from_element(element, max_depth=6, _depth=0):
 # Core capture function
 # ---------------------------------------------------------------------------
 
-def capture_active_window():
+def capture_window(pid, app_name, ax_window, window_id):
     """
-    Capture the active window's app name, title, and visible text.
+    Extract content from a specific window identified by pid, app_name,
+    AX element, and window_id.
 
     Privacy layers applied in order:
       1. App blocklist — blocked apps return name only, no content
       2. Window state — hidden apps and private browser windows skipped
       3. Secure field filtering — password fields excluded from AX tree walk
       4. URL scrubbing — sensitive query parameters redacted in final text
+      5. Sensitive page detection — known sensitive content filtered
 
-    Returns a dict with keys: ts, app, title, text, pid, filtered.
-    Returns None if no active app is found or if the window is filtered.
+    Returns a dict with keys: ts, app, title, text, pid, window_id, filtered.
+    Returns None if the window is hidden or otherwise fully suppressed.
     """
-    frontmost = _get_frontmost_app()
-
-    if frontmost is None:
-        return None
-
-    app_name = frontmost["name"]
-    pid = frontmost["pid"]
     ts = datetime.now(timezone.utc).isoformat()
     idle_s = round(seconds_since_last_input(), 1)
 
@@ -197,6 +192,7 @@ def capture_active_window():
             "text": "",
             "url": None,
             "pid": pid,
+            "window_id": window_id,
             "idle_s": idle_s,
             "filtered": "app_blocked",
         }
@@ -205,22 +201,17 @@ def capture_active_window():
     if is_app_hidden(pid):
         return None
 
-    # Create AX element for the app
-    ax_app = AXUIElementCreateApplication(pid)
-
-    # Get the focused window
-    focused_window = _ax_attr(ax_app, "AXFocusedWindow")
     window_title = ""
     visible_text = ""
     url = None
 
-    if focused_window is not None:
-        title_val = _ax_attr(focused_window, "AXTitle")
+    if ax_window is not None:
+        title_val = _ax_attr(ax_window, "AXTitle")
         if isinstance(title_val, str):
             window_title = title_val.strip()
 
         # Layer 2b: Private browser window detection
-        if is_private_window(app_name, window_title, ax_window=focused_window):
+        if is_private_window(app_name, window_title, ax_window=ax_window):
             return {
                 "ts": ts,
                 "app": app_name,
@@ -228,6 +219,7 @@ def capture_active_window():
                 "text": "",
                 "url": None,
                 "pid": pid,
+                "window_id": window_id,
                 "idle_s": idle_s,
                 "filtered": "private_window",
             }
@@ -236,7 +228,7 @@ def capture_active_window():
         # content lives deep inside an AXWebArea node. Find it first
         # and extract text from there with deeper traversal.
         # Layer 3 (secure field skipping) is applied inside _extract_text_from_element.
-        web_area = _find_web_area(focused_window, max_depth=_SCREEN_CFG.get("ax_web_area_search_depth", 10))
+        web_area = _find_web_area(ax_window, max_depth=_SCREEN_CFG.get("ax_web_area_search_depth", 10))
         if web_area is not None:
             # Extract URL from AXWebArea (works on Chromium, Safari, Electron)
             url_val = _ax_attr(web_area, "AXURL")
@@ -249,7 +241,7 @@ def capture_active_window():
             raw_texts = _extract_text_from_element(web_area, max_depth=_SCREEN_CFG.get("ax_web_content_depth", 15))
         else:
             # Native apps: shallower traversal is sufficient
-            raw_texts = _extract_text_from_element(focused_window, max_depth=_SCREEN_CFG.get("ax_tree_depth", 5))
+            raw_texts = _extract_text_from_element(ax_window, max_depth=_SCREEN_CFG.get("ax_tree_depth", 5))
 
         # Deduplicate while preserving order, truncate to avoid huge payloads
         seen = set()
@@ -278,6 +270,7 @@ def capture_active_window():
                 "text": "",
                 "url": None,
                 "pid": pid,
+                "window_id": window_id,
                 "idle_s": idle_s,
                 "filtered": "sensitive_page",
             }
@@ -289,8 +282,31 @@ def capture_active_window():
         "text": visible_text,
         "url": url,
         "pid": pid,
+        "window_id": window_id,
         "idle_s": idle_s,
     }
+
+
+def capture_active_window():
+    """
+    Capture the frontmost app's active window. Used by --once CLI mode.
+
+    Thin wrapper: resolves the frontmost app via _get_frontmost_app(), then
+    delegates all content extraction to capture_window().
+    """
+    frontmost = _get_frontmost_app()
+    if frontmost is None:
+        return None
+
+    ax_app = AXUIElementCreateApplication(frontmost["pid"])
+    ax_window = _ax_attr(ax_app, "AXFocusedWindow")
+
+    return capture_window(
+        pid=frontmost["pid"],
+        app_name=frontmost["name"],
+        ax_window=ax_window,
+        window_id=None,
+    )
 
 
 def capture_active_window_safe():
