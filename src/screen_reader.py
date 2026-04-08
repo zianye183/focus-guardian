@@ -26,7 +26,6 @@ from ApplicationServices import (
     AXUIElementCopyAttributeValue,
 )
 from CoreFoundation import (
-    CFRunLoopGetCurrent,
     CFRunLoopRunInMode,
     kCFRunLoopDefaultMode,
 )
@@ -70,17 +69,46 @@ def _ax_attr(element, attr):
 
 
 def _find_web_area(element, depth=0, max_depth=10):
-    """Find the AXWebArea node in Electron/Chromium apps."""
+    """Find the best AXWebArea node in Electron/Chromium apps.
+
+    Some Electron apps (e.g. Claude desktop) have multiple nested
+    AXWebArea nodes — the first is often an empty shell.  We collect
+    all candidates and return the one with the most children, which
+    is the one that actually holds page content.
+    """
+    candidates = []
+    _collect_web_areas(element, candidates, depth, max_depth)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    # Pick the web area with the deepest descendant tree (content-bearing).
+    # Some Electron apps wrap content in a single AXGroup child, so
+    # counting only direct children can tie.  Instead, count total
+    # descendants two levels deep.
+    def _descendant_count(el):
+        children = _ax_attr(el, "AXChildren") or []
+        total = len(children)
+        for child in children:
+            grandchildren = _ax_attr(child, "AXChildren") or []
+            total += len(grandchildren)
+        return total
+
+    best = max(candidates, key=_descendant_count)
+    return best
+
+
+def _collect_web_areas(element, results, depth=0, max_depth=10):
+    """Gather every AXWebArea node within *max_depth* levels."""
+    if depth > max_depth:
+        return
     role = _ax_attr(element, "AXRole") or ""
     if role == "AXWebArea":
-        return element
+        results.append(element)
     children = _ax_attr(element, "AXChildren")
-    if children and depth < max_depth:
+    if children:
         for child in children:
-            result = _find_web_area(child, depth + 1, max_depth)
-            if result:
-                return result
-    return None
+            _collect_web_areas(child, results, depth + 1, max_depth)
 
 
 def _extract_text_from_element(element, max_depth=6, _depth=0):
@@ -231,8 +259,10 @@ def capture_window(pid, app_name, ax_window, window_id):
             }
 
     # Skip windows where AX returned nothing useful — background Arc tabs,
-    # animation frames where AX matched but content wasn't rendered yet, etc.
-    if not window_title and not visible_text:
+    # animation frames where AX matched but content wasn't rendered yet,
+    # and ephemeral toast overlays (e.g. Arc "Un-Pinned Tab from ..." or "211%").
+    min_text = _SCREEN_CFG.get("min_text_length", 50)
+    if not window_title and len(visible_text) < min_text:
         return None
 
     return {
@@ -309,7 +339,7 @@ def _layout_key(windows):
     )
 
 
-def run_continuous(interval=3.0, verbose=False):
+def run_continuous(interval=3.0, verbose=False, db_path=None):
     """
     Capture all visible windows every `interval` seconds, dedup per window,
     and store in SQLite.
@@ -329,7 +359,7 @@ def run_continuous(interval=3.0, verbose=False):
 
     idle_timeout = _SCREEN_CFG.get("idle_timeout_seconds", 180)
 
-    conn = init_db()
+    conn = init_db(db_path)
 
     print(
         f"Screen reader running (interval={interval}s, idle_timeout={idle_timeout}s, "
@@ -460,6 +490,10 @@ if __name__ == "__main__":
         help="[TESTING ONLY] Seconds to wait before capturing (use with --once to switch apps first)",
     )
     parser.add_argument(
+        "--db", type=str, default=None,
+        help="Path to SQLite database (default: from config.yaml)",
+    )
+    parser.add_argument(
         "--check", action="store_true",
         help="Check accessibility permission and exit",
     )
@@ -486,4 +520,5 @@ if __name__ == "__main__":
     run_continuous(
         interval=args.interval,
         verbose=args.verbose,
+        db_path=args.db,
     )

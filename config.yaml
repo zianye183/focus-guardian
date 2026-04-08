@@ -4,9 +4,10 @@ screen_reader:
   interval_seconds: 3.0
   max_text_length: 20000
   idle_timeout_seconds: 180      # 3 min no input → idle marker emitted, captures paused
-  ax_tree_depth: 5               # native apps
+  ax_tree_depth: 10              # native apps (Preview PDFs need depth 9)
   ax_web_area_search_depth: 10   # how deep to search for AXWebArea node
   ax_web_content_depth: 15       # how deep to extract text inside AXWebArea
+  min_text_length: 50            # skip windows with no title and text shorter than this (filters toast overlays)
 
 dedup:
   similarity_threshold: 0.85    # text similarity ratio to consider duplicate (0.0-1.0)
